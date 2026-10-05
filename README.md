@@ -18,7 +18,7 @@ chmod +x setup.sh
 | Opzione | Descrizione |
 |---|---|
 | `--mode install\|uninstall` | Operazione (default `install`). Scorciatoie: `--install`, `--uninstall` |
-| `--engine podman\|docker\|both` | Engine da gestire (default `both`) |
+| `--engine podman\|docker\|both` | Engine da gestire. Default: `podman` su RHEL/Alma, `both` su Debian/Ubuntu |
 | `--dry-run` | Mostra i comandi senza eseguirli |
 | `--purge` | (uninstall) elimina anche container, immagini, volumi e i range subuid/subgid aggiunti dallo script |
 | `--remove-packages` | (uninstall) rimuove i pacchetti installati dallo script |
@@ -100,6 +100,11 @@ la disinstallazione ripristina solo quelle modifiche.
 
 - Su RHEL/Alma `containerd.io` (repo Docker) e i pacchetti runtime di Podman possono
   confliggere (es. `runc`): se `--engine both` fallisce, usa un solo engine per host.
+- Su RHEL/Alma 10 Docker rootless richiede i moduli netfilter di `kernel-modules-extra`, che dnf
+  installa per il kernel piu' recente: se il kernel in esecuzione e' piu' vecchio, lo script
+  prepara tutto, salta l'avvio di Docker e chiede di riavviare e rilanciare (e' idempotente).
+  Per questo su RHEL/Alma il default e' solo Podman; Docker va richiesto con `--engine docker|both`.
+- La disinstallazione toglie il repo Docker solo con `--remove-packages`.
 - Pacchetti distro in conflitto (`docker.io`, `podman-docker`) vanno rimossi a mano.
 - La delega cgroup e il profilo AppArmor hanno effetto completo dopo un nuovo login.
 - Per testare altre distro in `--dry-run` si puo' usare `OS_RELEASE_FILE=/percorso/os-release`.

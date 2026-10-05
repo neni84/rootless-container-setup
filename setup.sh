@@ -22,7 +22,8 @@ readonly SCRIPT_VERSION="1.0.0"
 
 # --- Valori di default (sovrascrivibili da CLI) ------------------------------
 MODE="install"
-ENGINE="both"
+ENGINE=""            # vuoto = scelta automatica per famiglia di distro (vedi resolve_default_engine)
+NEED_REBOOT=0        # impostato quando manca un prerequisito del kernel in esecuzione
 DRY_RUN=0
 PURGE=0
 REMOVE_PACKAGES=0
@@ -241,6 +242,14 @@ detect_os() {
 
 is_rhel_family() { [[ $PKG == dnf ]]; }
 
+# Default dell'engine quando --engine non e' passato: su RHEL/Alma solo Podman
+# (percorso supportato dalla distro), su Debian/Ubuntu Podman e Docker insieme.
+resolve_default_engine() {
+  [[ -n $ENGINE ]] && return 0
+  if is_rhel_family; then ENGINE=podman; else ENGINE=both; fi
+  log_info "Engine non specificato: uso '$ENGINE' (default per $OS_ID). Cambialo con --engine podman|docker|both."
+}
+
 preflight() {
   log_step "Controlli preliminari"
   if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
@@ -388,8 +397,8 @@ Suites: $OS_CODENAME
 Components: stable
 Architectures: $(dpkg --print-architecture 2>/dev/null || echo amd64)
 Signed-By: /etc/apt/keyrings/docker.asc"
-      sysfile_register docker /etc/apt/sources.list.d/docker.sources
-      sysfile_register docker /etc/apt/keyrings/docker.asc
+      sysfile_register docker-repo /etc/apt/sources.list.d/docker.sources
+      sysfile_register docker-repo /etc/apt/keyrings/docker.asc
       APT_UPDATED=0
       pkg_refresh
       ;;
@@ -399,7 +408,7 @@ Signed-By: /etc/apt/keyrings/docker.asc"
         return 0
       fi
       run_sudo curl -fsSL "https://download.docker.com/linux/$DOCKER_REPO_OS/docker-ce.repo" -o /etc/yum.repos.d/docker-ce.repo
-      sysfile_register docker /etc/yum.repos.d/docker-ce.repo
+      sysfile_register docker-repo /etc/yum.repos.d/docker-ce.repo
       ;;
   esac
 }
@@ -553,7 +562,7 @@ setup_selinux() {
   log_info "SELinux in modalita': $mode"
   # container_manage_cgroup: necessario per container che eseguono systemd.
   local bool=container_manage_cgroup prev
-  prev=$(getsebool "$bool" 2>/dev/null | awk '{print $3}')
+  prev=$(getsebool "$bool" 2>/dev/null | awk '{print $3}' || true)
   if [[ $prev == off ]]; then
     log_info "Abilito il boolean SELinux $bool (era: off)"
     run_sudo setsebool -P "$bool" on
@@ -631,7 +640,9 @@ Delegate=cpu cpuset io memory pids"
     log_warn "La delega cgroup ha effetto dopo un nuovo login dell'utente."
   fi
 
-  # RHEL: moduli netfilter necessari al rootless networking di Docker.
+  # RHEL: moduli netfilter necessari al rootless networking di Docker. Sono in
+  # kernel-modules-extra, che dnf installa per il kernel PIU' RECENTE: se il kernel
+  # in esecuzione e' piu' vecchio i moduli non si caricano e serve un reboot.
   if is_rhel_family; then
     local mods=/etc/modules-load.d/rootless-docker.conf
     if [[ ! -f $mods ]]; then
@@ -640,7 +651,10 @@ ip6_tables
 iptable_nat
 ip6table_nat"
       sysfile_register docker "$mods"
-      run_try sudo modprobe -a ip_tables ip6_tables iptable_nat ip6table_nat
+    fi
+    if ! run sudo modprobe -a ip_tables ip6_tables iptable_nat ip6table_nat 2>/dev/null; then
+      NEED_REBOOT=1
+      log_warn "Moduli netfilter non caricabili per il kernel in esecuzione ($(uname -r)): riavvia l'host sul kernel piu' recente e rilancia lo script per completare Docker."
     fi
   fi
 }
@@ -785,7 +799,10 @@ test_engine() {
 run_post_install_tests() {
   log_step "Test di funzionamento (senza sudo)"
   has_engine podman && test_engine podman
-  has_engine docker && test_engine docker
+  if has_engine docker; then
+    if (( NEED_REBOOT )); then log_warn "Test di docker saltato (reboot necessario)."
+    else test_engine docker; fi
+  fi
   return 0
 }
 
@@ -803,7 +820,13 @@ do_install() {
   enable_linger
   ensure_user_session
   has_engine podman && setup_podman_services
-  has_engine docker && setup_docker_services
+  if has_engine docker; then
+    if (( NEED_REBOOT )); then
+      log_warn "Salto l'avvio di Docker rootless: serve prima un reboot (vedi sopra)."
+    else
+      setup_docker_services
+    fi
+  fi
   setup_env
   setup_selinux
   setup_firewall
@@ -816,6 +839,8 @@ do_install() {
   fi
   if (( DRY_RUN )); then
     log_success "Dry-run completato: nessuna modifica applicata."
+  elif (( NEED_REBOOT )); then
+    log_warn "Podman e prerequisiti pronti, ma Docker rootless NON e' ancora attivo: riavvia l'host e rilancia '$SCRIPT_NAME --engine ${ENGINE}' (e' idempotente)."
   else
     log_success "Setup rootless completato. Apri una nuova shell (o 'source $RC_FILE') per caricare le variabili."
   fi
@@ -994,6 +1019,8 @@ do_uninstall() {
     (( REMOVE_PACKAGES )) || log_info "Il repository Docker resta configurato finche' non rimuovi i pacchetti."
   fi
   if (( REMOVE_PACKAGES )) && has_engine docker; then
+    sysfiles_remove_owner docker-repo
+    pkg_refresh
     run_try sudo systemctl daemon-reload
   fi
 
@@ -1001,7 +1028,9 @@ do_uninstall() {
     restore_linger
     if (( PURGE )); then restore_subids
     else log_info "Range subuid/subgid conservati (servono per i file dei dati rimasti; --purge li rimuove)."; fi
-    (( DRY_RUN )) || [[ -n $(state_get FILES_common)$(state_get PKGS_common)$(state_get SUBUID_BY_US) ]] || rm -f "$STATE_FILE"
+    # Il file di stato si elimina solo quando e' davvero vuoto: PKGS_*/FILES_* di un engine
+    # (es. pacchetti non rimossi senza --remove-packages) servono a un'esecuzione successiva.
+    if (( ! DRY_RUN )) && [[ -f $STATE_FILE ]] && ! grep -q . "$STATE_FILE"; then rm -f "$STATE_FILE"; fi
   fi
 
   (( DRY_RUN )) || verify_uninstall
@@ -1029,7 +1058,8 @@ Uso: $SCRIPT_NAME [opzioni]
 
   --mode install|uninstall   operazione (default: install)
   --install | --uninstall    scorciatoie per --mode
-  --engine podman|docker|both  engine da gestire (default: both)
+  --engine podman|docker|both  engine da gestire (default: podman su RHEL/Alma,
+                             both su Debian/Ubuntu)
   --dry-run                  mostra i comandi senza eseguirli
   --purge                    (uninstall) elimina anche immagini/volumi/container
                              e i range subuid/subgid aggiunti dallo script
@@ -1086,7 +1116,7 @@ parse_args() {
     shift
   done
   case $MODE in install|uninstall) ;; *) die "--mode deve essere install o uninstall (ricevuto: '$MODE')." ;; esac
-  case $ENGINE in podman|docker|both) ;; *) die "--engine deve essere podman, docker o both (ricevuto: '$ENGINE')." ;; esac
+  case $ENGINE in ""|podman|docker|both) ;; *) die "--engine deve essere podman, docker o both (ricevuto: '$ENGINE')." ;; esac
   if [[ $MODE == install ]] && (( PURGE || REMOVE_PACKAGES )); then
     die "--purge e --remove-packages hanno senso solo con --mode uninstall."
   fi
@@ -1099,6 +1129,7 @@ main() {
   (( DRY_RUN )) && log_warn "Modalita' DRY-RUN: nessuna modifica verra' applicata."
   preflight
   detect_os
+  resolve_default_engine
   if [[ $MODE == install ]]; then do_install; else do_uninstall; fi
 }
 
