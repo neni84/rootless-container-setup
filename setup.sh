@@ -900,6 +900,21 @@ uninstall_docker() {
   backup_and_remove_config .config/docker
 }
 
+# Residui lasciati da podman/rootlesskit/systemd dopo la disinstallazione.
+# Con --purge si eliminano anche le directory di stato degli engine rimossi; in ogni
+# caso si tolgono solo directory VUOTE (mai file dell'utente in ~/.config/systemd).
+prune_residual_dirs() {
+  local d
+  if (( PURGE )); then
+    has_engine docker && [[ -d $HOME/.local/share/rootlesskit ]] && run_try rm -rf "${HOME:?}/.local/share/rootlesskit"
+    has_engine podman && [[ -d $HOME/.config/cni ]] && run_try rm -rf "${HOME:?}/.config/cni"
+  fi
+  for d in .config/systemd .local/state/rootless-container-setup; do
+    [[ -d $HOME/$d ]] && run_try find "$HOME/$d" -depth -type d -empty -delete
+  done
+  return 0
+}
+
 # Altri servizi utente attivi oltre a quelli "di base" del desktop/sessione?
 other_user_services_active() {
   local n
@@ -1032,6 +1047,8 @@ do_uninstall() {
     # (es. pacchetti non rimossi senza --remove-packages) servono a un'esecuzione successiva.
     if (( ! DRY_RUN )) && [[ -f $STATE_FILE ]] && ! grep -q . "$STATE_FILE"; then rm -f "$STATE_FILE"; fi
   fi
+
+  prune_residual_dirs
 
   (( DRY_RUN )) || verify_uninstall
   log_step "Riepilogo"
