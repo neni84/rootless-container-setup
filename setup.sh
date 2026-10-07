@@ -640,6 +640,17 @@ Delegate=cpu cpuset io memory pids"
     log_warn "La delega cgroup ha effetto dopo un nuovo login dell'utente."
   fi
 
+  # Debian/Ubuntu: dockerd-rootless-setuptool.sh (Docker 29+) rifiuta di installare se il
+  # modulo nf_tables non e' caricato (su un'installazione pulita di solito non lo e').
+  if ! is_rhel_family; then
+    local nft_mods=/etc/modules-load.d/rootless-docker.conf
+    if [[ ! -f $nft_mods ]]; then
+      write_root_file "$nft_mods" 0644 "nf_tables"
+      sysfile_register docker "$nft_mods"
+    fi
+    run sudo modprobe nf_tables || die "Impossibile caricare il modulo kernel nf_tables, richiesto da Docker rootless."
+  fi
+
   # RHEL: moduli netfilter necessari al rootless networking di Docker. Sono in
   # kernel-modules-extra, che dnf installa per il kernel PIU' RECENTE: se il kernel
   # in esecuzione e' piu' vecchio i moduli non si caricano e serve un reboot.
