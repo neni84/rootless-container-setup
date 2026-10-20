@@ -379,6 +379,30 @@ install_podman_packages() {
   esac
 }
 
+# "podman compose" non ha un provider di serie: serve il plugin Docker Compose (v2+), che usa tramite il
+# socket di Podman. Non si usa podman-compose (EPEL): concatena le liste dei file -f e rifiuta gli overlay
+# che ridefiniscono un elenco (es. healthcheck.test: "'CMD_SHELL' takes a single string after it").
+# Con --engine docker/both il plugin arriva gia' con docker-compose-plugin.
+install_podman_compose_provider() {
+  has_engine podman || return 0
+  has_engine docker && return 0
+  log_step "Provider compose per Podman"
+  case $PKG in
+    apt)
+      if pkg_available docker-compose-v2; then
+        pkgs_install podman docker-compose-v2
+      else
+        setup_docker_repo
+        pkgs_install podman docker-compose-plugin
+      fi
+      ;;
+    dnf)
+      setup_docker_repo
+      pkgs_install podman docker-compose-plugin
+      ;;
+  esac
+}
+
 setup_docker_repo() {
   log_info "Configuro il repository ufficiale Docker ($DOCKER_REPO_OS)"
   case $PKG in
@@ -807,9 +831,23 @@ test_engine() {
   FAILURES=$((FAILURES + 1))
 }
 
+test_podman_compose() {
+  if (( DRY_RUN )); then
+    run podman compose version
+    return 0
+  fi
+  command -v podman >/dev/null 2>&1 || return 0
+  if PODMAN_COMPOSE_WARNING_LOGS=false podman compose version >/dev/null 2>&1; then
+    log_success "podman compose OK (provider compose trovato)."
+  else
+    log_warn "podman compose non ha un provider compose: installa il plugin Docker Compose (docker-compose-plugin)."
+  fi
+}
+
 run_post_install_tests() {
   log_step "Test di funzionamento (senza sudo)"
   has_engine podman && test_engine podman
+  has_engine podman && test_podman_compose
   if has_engine docker; then
     if (( NEED_REBOOT )); then log_warn "Test di docker saltato (reboot necessario)."
     else test_engine docker; fi
@@ -824,6 +862,7 @@ do_install() {
   install_common_packages
   has_engine podman && install_podman_packages
   has_engine docker && install_docker_packages
+  install_podman_compose_provider
   setup_subids
   setup_userns_sysctl
   setup_low_ports
@@ -1044,7 +1083,10 @@ do_uninstall() {
   if has_engine docker && [[ " $(state_get ENGINES) " != *" docker "* ]]; then
     (( REMOVE_PACKAGES )) || log_info "Il repository Docker resta configurato finche' non rimuovi i pacchetti."
   fi
-  if (( REMOVE_PACKAGES )) && has_engine docker; then
+  # Il repository Docker va tolto quando non serve piu': lo aggiunge anche il solo Podman (per il plugin
+  # compose), quindi non basta controllare che si stia disinstallando Docker.
+  if (( REMOVE_PACKAGES )) && [[ " $remaining " != *" docker "* ]] \
+     && { has_engine docker || [[ -n $(state_get FILES_docker-repo) ]]; }; then
     sysfiles_remove_owner docker-repo
     pkg_refresh
     run_try sudo systemctl daemon-reload

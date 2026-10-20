@@ -59,6 +59,12 @@ chmod +x setup.sh
    `container-selinux` su RHEL. Docker: `docker-ce`, `docker-ce-cli`, `containerd.io`,
    buildx/compose, `docker-ce-rootless-extras`. Il daemon Docker rootful di sistema viene
    disabilitato (salvo `--keep-system-docker` o se era gia' in uso).
+   Con il **solo Podman** installa anche un provider per `podman compose` (che di serie non ne ha uno):
+   il plugin Docker Compose (`docker-compose-v2` da Ubuntu se disponibile, altrimenti
+   `docker-compose-plugin` dal repository Docker, che viene configurato e rimosso con
+   `--uninstall --remove-packages`). Non si usa `podman-compose` (EPEL): concatena le liste dei file
+   `-f` e rifiuta gli overlay che ridefiniscono un elenco come `healthcheck.test`.
+   Con `--engine docker|both` il plugin arriva gia' con Docker.
 3. Range `/etc/subuid` e `/etc/subgid` (65536 id, a partire da 100000 o dal primo range libero).
 4. `loginctl enable-linger $USER`.
 5. Servizi utente: `systemctl --user enable --now podman.socket`;
@@ -77,7 +83,7 @@ chmod +x setup.sh
    [[ ":$PATH:" == *":$HOME/bin:"* ]] || export PATH=$HOME/bin:$PATH
    ```
 
-9. Test finale senza sudo: `podman info` e/o `docker info`.
+9. Test finale senza sudo: `podman info` e/o `docker info` e, per Podman, `podman compose version`.
 
 ## Cosa fa in disinstallazione
 
