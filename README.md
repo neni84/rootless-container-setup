@@ -114,6 +114,10 @@ la disinstallazione ripristina solo quelle modifiche.
 - La disinstallazione toglie il repo Docker solo con `--remove-packages`.
 - Pacchetti distro in conflitto (`docker.io`, `podman-docker`) vanno rimossi a mano.
 - La delega cgroup e il profilo AppArmor hanno effetto completo dopo un nuovo login.
+- **Riavvio della macchina (Podman):** con linger attivo il manager utente parte al boot, e `podman-restart.service`
+  (abilitata dallo script) riavvia i container con restart policy `always`/`unless-stopped`. Con Podman 4.x (Ubuntu 24.04)
+  l'unita' filtra solo `restart-policy=always`: un container `unless-stopped` potrebbe non ripartire. Con Docker rootless
+  ci pensa il daemon utente (`docker.service`).
 - Per testare altre distro in `--dry-run` si puo' usare `OS_RELEASE_FILE=/percorso/os-release`.
 
 ## Verifica dello script
