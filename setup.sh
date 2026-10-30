@@ -700,6 +700,13 @@ ip6table_nat"
 setup_podman_services() {
   log_step "Servizi utente Podman"
   run systemctl --user enable --now podman.socket
+  # Il linger avvia il manager utente al boot, ma nessuno riavvia i container: senza podman-restart.service quelli
+  # con restart policy (always / unless-stopped) restano fermi dopo un riavvio della macchina.
+  if systemctl --user cat podman-restart.service >/dev/null 2>&1; then
+    run systemctl --user enable podman-restart.service
+  else
+    log_warn "podman-restart.service non disponibile: i container non ripartiranno da soli dopo un riavvio."
+  fi
   state_add ENGINES podman
 }
 
@@ -913,6 +920,7 @@ backup_and_remove_config() {
 uninstall_podman() {
   log_step "Disinstallazione Podman (utente)"
   run_try systemctl --user disable --now podman.socket podman.service
+  run_try systemctl --user disable podman-restart.service   # senza --now: lo stop fermerebbe tutti i container
   if (( PURGE )); then
     if command -v podman >/dev/null 2>&1; then
       log_info "Elimino container, immagini e volumi Podman (podman system reset)"
