@@ -28,6 +28,7 @@ chmod +x setup.sh
 | `--no-selinux` | (RHEL) non modifica i boolean SELinux |
 | `--open-port 8080/tcp` | (RHEL) apre una porta in firewalld, ripetibile |
 | `--low-ports` | Consente agli utenti non root di usare le porte < 1024 |
+| `--no-shell` | A fine installazione non propone la nuova shell con l'ambiente gia' caricato (da terminale la propone; con `--yes` la apre senza chiedere, `exit` per tornare) |
 | `--force-distro` | Tenta su distro/versioni non ufficialmente supportate |
 | `--no-color` | Disattiva i colori |
 

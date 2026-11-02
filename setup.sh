@@ -32,6 +32,7 @@ FORCE_DISTRO=0
 KEEP_SYSTEM_DOCKER=0
 NO_SELINUX=0
 LOW_PORTS=0
+NO_SHELL=0           # non proporre la nuova shell con l'ambiente caricato a fine installazione
 USE_COLOR=1
 RC_FILE="${HOME:-}/.bashrc"
 FW_PORTS=()
@@ -865,6 +866,123 @@ run_post_install_tests() {
 }
 
 # =============================================================================
+# Riepilogo finale
+# =============================================================================
+# Una riga per controllo: OK, !! (da sapere, non e' un errore) o KO (conta come fallimento). I controlli girano nel
+# processo dello script, che ha gia' l'ambiente caricato (XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS, DOCKER_HOST):
+# funzionano anche se la sessione ssh da cui parte l'installazione e' nata prima del manager systemd utente.
+SUMMARY_FAIL=0
+summary_row() {
+  local mark color
+  case $1 in
+    ok)   mark="OK"; color=$C_GREEN ;;
+    warn) mark="!!"; color=$C_YELLOW ;;
+    *)    mark="KO"; color=$C_RED; SUMMARY_FAIL=$((SUMMARY_FAIL + 1)) ;;
+  esac
+  printf '  %s[%s]%s %-34s %s\n' "$color" "$mark" "$C_RESET" "$2" "$3"
+}
+
+# Stato di un'unita' utente: "enabled", "disabled", ... oppure "assente" se non esiste.
+user_unit_state() {
+  local out
+  out=$(systemctl --user is-enabled "$1" 2>/dev/null) || true
+  printf '%s' "${out:-assente}"
+}
+user_unit_active() { systemctl --user is-active "$1" 2>/dev/null || true; }
+
+summary_common() {
+  local v u g
+  v=$(loginctl show-user "$USER_NAME" -p Linger --value 2>/dev/null) || v=no
+  if [[ $v == yes ]]; then summary_row ok "Linger (servizi dopo il logout)" "attivo per $USER_NAME"
+  else summary_row fail "Linger (servizi dopo il logout)" "non attivo: i servizi si fermano al logout"; fi
+
+  u=$(user_subid_count /etc/subuid); g=$(user_subid_count /etc/subgid)
+  if (( u >= SUBID_COUNT && g >= SUBID_COUNT )); then summary_row ok "Range subuid/subgid" "subuid=$u subgid=$g"
+  else summary_row fail "Range subuid/subgid" "insufficienti (subuid=$u subgid=$g, servono $SUBID_COUNT)"; fi
+
+  if grep -qF "$MARK_BEGIN" "$RC_FILE" 2>/dev/null; then summary_row ok "Variabili d'ambiente" "$RC_FILE (XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-?})"
+  else summary_row fail "Variabili d'ambiente" "blocco non trovato in $RC_FILE"; fi
+
+  v=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null) || v=1024
+  if (( v <= 80 )); then summary_row ok "Porte < 1024 (80/443)" "consentite (ip_unprivileged_port_start=$v)"
+  elif (( LOW_PORTS )); then summary_row fail "Porte < 1024 (80/443)" "richieste con --low-ports ma non attive (ip_unprivileged_port_start=$v)"
+  else summary_row ok "Porte < 1024 (80/443)" "non consentite (ip_unprivileged_port_start=$v): per npm/traefik usa --low-ports"; fi
+}
+
+summary_podman() {
+  local out v
+  out=$(podman info --format 'rootless={{.Host.Security.Rootless}}' 2>/dev/null) || out=""
+  if [[ $out == rootless=true ]]; then summary_row ok "Podman rootless" "$out"
+  else summary_row fail "Podman rootless" "${out:-'podman info' non riuscito}"; fi
+
+  v=$(user_unit_state podman.socket)
+  if [[ $v == enabled ]]; then summary_row ok "podman.socket (utente)" "enabled, $(user_unit_active podman.socket)"
+  else summary_row fail "podman.socket (utente)" "$v"; fi
+
+  v=$(user_unit_state podman-restart.service)
+  if [[ $v == enabled ]]; then summary_row ok "podman-restart.service" "enabled: i container ripartono al riavvio"
+  elif [[ $v == assente ]]; then summary_row warn "podman-restart.service" "non disponibile: i container non ripartono da soli al riavvio"
+  else summary_row fail "podman-restart.service" "$v"; fi
+
+  if PODMAN_COMPOSE_WARNING_LOGS=false podman compose version >/dev/null 2>&1; then summary_row ok "podman compose" "provider trovato"
+  else summary_row warn "podman compose" "nessun provider (installa docker-compose-plugin)"; fi
+}
+
+summary_docker() {
+  if (( NEED_REBOOT )); then
+    summary_row warn "Docker rootless" "non ancora attivo: riavvia l'host e rilancia lo script"
+    return 0
+  fi
+  local out v
+  out=$(docker info --format '{{range .SecurityOptions}}{{.}} {{end}}' 2>/dev/null) || out=""
+  if [[ $out == *rootless* ]]; then summary_row ok "Docker rootless" "rootless=true"
+  else summary_row fail "Docker rootless" "${out:-'docker info' non riuscito}"; fi
+
+  v=$(user_unit_state docker.service)
+  if [[ $v == enabled ]]; then summary_row ok "docker.service (utente)" "enabled, $(user_unit_active docker.service)"
+  else summary_row fail "docker.service (utente)" "$v"; fi
+  summary_row ok "DOCKER_HOST" "${DOCKER_HOST:-non impostato}"
+}
+
+summary_firewall() {
+  (( ${#FW_PORTS[@]} )) || return 0
+  is_rhel_family && command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null || return 0
+  local p
+  for p in "${FW_PORTS[@]}"; do
+    if firewall-cmd --query-port="$p" >/dev/null 2>&1; then summary_row ok "Firewalld $p" "aperta"
+    else summary_row fail "Firewalld $p" "non aperta"; fi
+  done
+}
+
+print_final_summary() {
+  log_step "Riepilogo finale"
+  printf '  Utente %s (UID %s), %s\n\n' "$USER_NAME" "$USER_ID" "$OS_NAME"
+  summary_common
+  has_engine podman && summary_podman
+  has_engine docker && summary_docker
+  summary_firewall
+  printf '\n'
+  if (( SUMMARY_FAIL )); then log_error "$SUMMARY_FAIL controlli non superati (righe KO sopra)."
+  else log_success "Tutti i controlli superati."; fi
+}
+
+# Da terminale propone di aprire una nuova shell con l'ambiente gia' caricato, cosi' 'podman' e 'systemctl --user'
+# funzionano subito senza logout. Con --yes lo fa senza chiedere; 'exit' riporta alla sessione precedente.
+offer_login_shell() {
+  (( NO_SHELL || DRY_RUN )) && return 0
+  [[ -t 0 && -t 1 ]] || return 0
+  local reply=y
+  if (( ! ASSUME_YES )); then
+    read -r -p "Aprire ora una nuova shell con l'ambiente caricato? ('exit' per tornare) [S/n] " reply || reply=n
+    [[ -z $reply ]] && reply=y
+  fi
+  if [[ $reply =~ ^[sSyY]$ ]]; then
+    log_info "Apro una nuova shell: l'ambiente e' gia' caricato."
+    exec "${SHELL:-/bin/bash}" -l
+  fi
+}
+
+# =============================================================================
 # Flusso di INSTALLAZIONE
 # =============================================================================
 do_install() {
@@ -891,9 +1009,14 @@ do_install() {
   setup_firewall
   run_post_install_tests
 
-  log_step "Riepilogo"
+  if (( DRY_RUN )); then
+    log_step "Riepilogo"
+  else
+    print_final_summary
+    FAILURES=$((FAILURES + SUMMARY_FAIL))
+  fi
   if (( FAILURES )); then
-    log_error "Installazione completata con $FAILURES test falliti. Apri una nuova sessione (login) e riprova '$SCRIPT_NAME' o i comandi 'podman info' / 'docker info'."
+    log_error "Installazione completata con $FAILURES controlli falliti. Apri una nuova sessione (login) e riprova '$SCRIPT_NAME' o i comandi 'podman info' / 'docker info'."
     return 1
   fi
   if (( DRY_RUN )); then
@@ -901,7 +1024,9 @@ do_install() {
   elif (( NEED_REBOOT )); then
     log_warn "Podman e prerequisiti pronti, ma Docker rootless NON e' ancora attivo: riavvia l'host e rilancia '$SCRIPT_NAME --engine ${ENGINE}' (e' idempotente)."
   else
-    log_success "Setup rootless completato. Questa sessione non ha ancora le variabili: prima di usare 'systemctl --user' o 'podman' a mano apri una nuova sessione (logout/login) oppure esegui 'source $RC_FILE'."
+    log_success "Setup rootless completato."
+    offer_login_shell
+    log_info "Questa sessione non ha ancora le variabili: prima di usare 'systemctl --user' o 'podman' a mano apri una nuova sessione (logout/login) oppure esegui 'source $RC_FILE'."
   fi
 }
 
@@ -999,7 +1124,7 @@ restore_linger() {
   if (( DRY_RUN )); then
     run loginctl disable-linger "$USER_NAME"
   else
-    loginctl disable-linger "$USER_NAME" 2>/dev/null || run_sudo loginctl disable-linger "$USER_NAME"
+    loginctl --no-ask-password disable-linger "$USER_NAME" 2>/dev/null || run_sudo loginctl disable-linger "$USER_NAME"
   fi
   state_del LINGER_BY_US
 }
@@ -1150,6 +1275,8 @@ Uso: $SCRIPT_NAME [opzioni]
   --no-selinux               (RHEL) non toccare i boolean SELinux
   --open-port PORTA/proto    (RHEL, firewalld) apre una porta, ripetibile
   --low-ports                consente agli utenti non root le porte < 1024 (sysctl)
+  --no-shell                 a fine installazione non proporre la nuova shell con
+                             l'ambiente gia' caricato (da terminale la propone)
   --force-distro             tenta anche su distro/versioni non supportate
   --no-color                 disattiva i colori
   -h, --help                 questo aiuto
@@ -1188,6 +1315,7 @@ parse_args() {
         [[ $2 =~ ^[0-9]+(-[0-9]+)?/(tcp|udp)$ ]] || die "Formato porta non valido: $2 (atteso es. 8080/tcp)."
         FW_PORTS+=("$2"); shift ;;
       --low-ports) LOW_PORTS=1 ;;
+      --no-shell) NO_SHELL=1 ;;
       --force-distro) FORCE_DISTRO=1 ;;
       --no-color) USE_COLOR=0 ;;
       -h|--help) usage; exit 0 ;;
