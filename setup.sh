@@ -549,7 +549,9 @@ enable_linger() {
   if (( DRY_RUN )); then
     run loginctl enable-linger "$USER_NAME"
   else
-    loginctl enable-linger "$USER_NAME" 2>/dev/null || run_sudo loginctl enable-linger "$USER_NAME"
+    # --no-ask-password: senza, loginctl lancia pkttyagent per chiedere l'autorizzazione polkit e su una
+    # macchina minimale (AlmaLinux) stampa "Failed to execute /usr/bin/pkttyagent"; se non basta, c'e' sudo.
+    loginctl --no-ask-password enable-linger "$USER_NAME" 2>/dev/null || run_sudo loginctl enable-linger "$USER_NAME"
   fi
   state_set LINGER_BY_US yes
 }
@@ -899,7 +901,7 @@ do_install() {
   elif (( NEED_REBOOT )); then
     log_warn "Podman e prerequisiti pronti, ma Docker rootless NON e' ancora attivo: riavvia l'host e rilancia '$SCRIPT_NAME --engine ${ENGINE}' (e' idempotente)."
   else
-    log_success "Setup rootless completato. Apri una nuova shell (o 'source $RC_FILE') per caricare le variabili."
+    log_success "Setup rootless completato. Questa sessione non ha ancora le variabili: prima di usare 'systemctl --user' o 'podman' a mano apri una nuova sessione (logout/login) oppure esegui 'source $RC_FILE'."
   fi
 }
 
