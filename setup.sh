@@ -906,7 +906,7 @@ summary_common() {
   v=$(cat /proc/sys/net/ipv4/ip_unprivileged_port_start 2>/dev/null) || v=1024
   if (( v <= 80 )); then summary_row ok "Porte < 1024 (80/443)" "consentite (ip_unprivileged_port_start=$v)"
   elif (( LOW_PORTS )); then summary_row fail "Porte < 1024 (80/443)" "richieste con --low-ports ma non attive (ip_unprivileged_port_start=$v)"
-  else summary_row ok "Porte < 1024 (80/443)" "non consentite (ip_unprivileged_port_start=$v): per npm/traefik usa --low-ports"; fi
+  else summary_row warn "Porte < 1024 (80/443)" "non consentite (ip_unprivileged_port_start=$v): per npm/traefik rilancia con --low-ports"; fi
 }
 
 summary_podman() {
