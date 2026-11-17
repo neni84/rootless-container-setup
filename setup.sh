@@ -630,16 +630,35 @@ setup_firewall() {
 }
 
 # --- Docker: requisiti specifici ---------------------------------------------
-setup_docker_prereqs() {
-  # Ubuntu 24.04+: AppArmor blocca i user namespace non confinati -> profilo per rootlesskit.
-  if [[ $OS_ID == ubuntu ]] &&
-     [[ $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0) == 1 ]]; then
-    local prof=/etc/apparmor.d/usr.bin.rootlesskit
+# Ubuntu 24.04+: AppArmor blocca i user namespace non confinati -> serve un profilo per rootlesskit.
+# Ubuntu 26.04 lo fornisce gia' (/etc/apparmor.d/rootlesskit): un secondo profilo sullo stesso binario da'
+# "conflicting profile attachments", il processo passa a "unprivileged_userns" e l'exec di /proc/self/exe e'
+# negato ("fork/exec /proc/self/exe: permission denied"). Si crea il proprio profilo solo se non ce n'e' altri;
+# un profilo nostro di una versione precedente, in presenza di quello di sistema, si rimuove.
+APPARMOR_DIR="${APPARMOR_DIR:-/etc/apparmor.d}"
+setup_apparmor_rootlesskit() {
+  local prof="$APPARMOR_DIR/usr.bin.rootlesskit" other
+  other=$(grep -lsE '^[[:space:]]*(profile[[:space:]]+[^[:space:]]+[[:space:]]+)?/usr/bin/rootlesskit([[:space:]]|\{)' "$APPARMOR_DIR"/* 2>/dev/null |
+          grep -vxF "$prof" | head -1 || true)
+  if [[ -n $other ]]; then
+    log_info "Profilo AppArmor per rootlesskit gia' fornito dal sistema ($other): non ne creo un secondo."
     if [[ -f $prof ]]; then
-      log_info "Profilo AppArmor per rootlesskit gia' presente."
-    else
-      log_info "Creo il profilo AppArmor per rootlesskit (apparmor_restrict_unprivileged_userns=1)"
-      write_root_file "$prof" 0644 "abi <abi/4.0>,
+      if [[ " $(state_get FILES_docker) " == *" $prof "* ]]; then
+        log_warn "Rimuovo il profilo $prof creato da una versione precedente dello script: va in conflitto con quello di sistema."
+        run_sudo apparmor_parser -R "$prof" || true
+        run_sudo rm -f "$prof"
+        state_remove_word FILES_docker "$prof"
+      else
+        log_warn "Esiste anche $prof: due profili sullo stesso binario impediscono l'avvio di rootlesskit. Rimuovilo: sudo apparmor_parser -R $prof && sudo rm $prof"
+      fi
+    fi
+    return 0
+  fi
+  if [[ -f $prof ]]; then
+    log_info "Profilo AppArmor per rootlesskit gia' presente."
+  else
+    log_info "Creo il profilo AppArmor per rootlesskit (apparmor_restrict_unprivileged_userns=1)"
+    write_root_file "$prof" 0644 "abi <abi/4.0>,
 include <tunables/global>
 
 /usr/bin/rootlesskit flags=(unconfined) {
@@ -648,9 +667,15 @@ include <tunables/global>
   # Site-specific additions and overrides. See local/README for details.
   include if exists <local/usr.bin.rootlesskit>
 }"
-      sysfile_register docker "$prof"
-      run_sudo systemctl restart apparmor.service
-    fi
+    sysfile_register docker "$prof"
+    run_sudo systemctl restart apparmor.service
+  fi
+}
+
+setup_docker_prereqs() {
+  if [[ $OS_ID == ubuntu ]] &&
+     [[ $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0) == 1 ]]; then
+    setup_apparmor_rootlesskit
   fi
 
   # Delega cgroup v2 (limiti di risorse nei container rootless).
