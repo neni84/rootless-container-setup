@@ -71,7 +71,10 @@ chmod +x setup.sh
 5. Servizi utente: `systemctl --user enable --now podman.socket`;
    `dockerd-rootless-setuptool.sh install` + `docker.service` utente.
 6. Requisiti Docker rootless: profilo AppArmor per `rootlesskit` su Ubuntu 24.04+
-   (se `apparmor_restrict_unprivileged_userns=1`), delega dei cgroup v2, modulo `nf_tables` su Debian/Ubuntu (caricato e reso persistente
+   (se `apparmor_restrict_unprivileged_userns=1`; **solo se il sistema non ne ha gia' uno**: Ubuntu 26.04 fornisce
+   `/etc/apparmor.d/rootlesskit`, e un secondo profilo sullo stesso binario da' «conflicting profile attachments» e
+   `fork/exec /proc/self/exe: permission denied`; un `usr.bin.rootlesskit` creato da una versione precedente dello script
+   viene rimosso), delega dei cgroup v2, modulo `nf_tables` su Debian/Ubuntu (caricato e reso persistente
    in `/etc/modules-load.d/rootless-docker.conf`), moduli `ip_tables` su RHEL,
    `user.max_user_namespaces` se a 0.
 7. RHEL/Alma: `container-selinux`, boolean `container_manage_cgroup`; firewalld solo se
