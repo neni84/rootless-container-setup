@@ -128,23 +128,8 @@ la disinstallazione ripristina solo quelle modifiche.
   daemon utente (`docker.service`).
 - Per testare altre distro in `--dry-run` si puo' usare `OS_RELEASE_FILE=/percorso/os-release`.
 
-## compose-v2-init.sh (stack Nextcloud ITS)
-
-Secondo passo per chi installa lo stack `nextcloud/compose-v2` su una VM che ha gia' il runtime
-(dopo `setup.sh`, in una sessione `ssh` nuova). Va eseguito da utente normale con `sudo`:
-
-1. controlla che `podman info` / `docker info` funzioni;
-2. installa i pacchetti di base mancanti (`git curl jq gawk unzip openssl tar python3-yaml`);
-3. chiede `ITS_GITLAB_ID`, `ITS_GITLAB_USER`, `ITS_GITLAB_REPO_TOKEN`, `ITS_GITLAB_REGISTRY_TOKEN`
-   (o le legge dalle variabili d'ambiente omonime) e salva l'accesso a GitLab in `~/.netrc`;
-4. clona (o aggiorna) compose-v2 in `~/compose-v2` (`COMPOSE_V2_DIR` per cambiare cartella);
-5. lancia `./setup.sh bootstrap`.
-
-E' idempotente e non contiene credenziali. Copia pubblica: snippet
-<https://gitlab.itservicenet.net/-/snippets/14>; flusso completo: `GUIDA-DEPLOY.md` in compose-v2.
-
 ## Verifica dello script
 
 ```bash
-bash -n setup.sh compose-v2-init.sh && shellcheck -x setup.sh compose-v2-init.sh
+bash -n setup.sh && shellcheck -x setup.sh
 ```
