@@ -725,12 +725,52 @@ ip6table_nat"
 # =============================================================================
 # Fase: servizi utente
 # =============================================================================
+# L'unita' podman-restart.service di serie avvia SOLO i container con restart policy "always"
+# (`podman start --all --filter restart-policy=always`), ma compose usa "unless-stopped": dopo un riavvio della
+# macchina nessun container ripartiva (visto su Ubuntu 26.04 con Podman 5.7). Un drop-in utente aggiunge il filtro
+# "unless-stopped" (filtri della stessa chiave: valgono in OR). Il file ha un marcatore: in disinstallazione si
+# toglie solo se e' nostro.
+PODMAN_RESTART_DROPIN_MARK="# Creato da rootless-container-setup"
+podman_restart_dropin_file() { printf '%s' "$HOME/.config/systemd/user/podman-restart.service.d/unless-stopped.conf"; }
+
+# ExecStart effettivo dell'unita' (l'ultimo: un drop-in lo ridefinisce dopo quello di serie).
+podman_restart_exec_line() {
+  systemctl --user cat podman-restart.service 2>/dev/null | grep '^ExecStart=.' | tail -1 || true
+}
+
+setup_podman_restart_dropin() {
+  local f exec_line
+  f=$(podman_restart_dropin_file)
+  exec_line=$(podman_restart_exec_line)
+  [[ -n $exec_line ]] || return 0
+  if [[ $exec_line == *restart-policy=unless-stopped* ]]; then
+    log_info "podman-restart.service avvia gia' anche i container con restart policy 'unless-stopped'."
+    return 0
+  fi
+  if [[ $exec_line != *"--filter restart-policy=always"* ]]; then
+    log_warn "podman-restart.service ha un comando inatteso ($exec_line): non lo modifico, i container 'unless-stopped' potrebbero non ripartire dopo un riavvio."
+    return 0
+  fi
+  log_info "Aggiungo a podman-restart.service i container con restart policy 'unless-stopped' (compose li usa di default)."
+  if (( DRY_RUN )); then
+    printf '%s[dry-run]%s + scrivo %s\n' "$C_DIM" "$C_RESET" "$f"
+    return 0
+  fi
+  mkdir -p "$(dirname "$f")"
+  {
+    printf '%s (l unita di serie avvia solo restart-policy=always)\n' "$PODMAN_RESTART_DROPIN_MARK"
+    printf '[Service]\nExecStart=\n%s --filter restart-policy=unless-stopped\n' "$exec_line"
+  } >"$f"
+  systemctl --user daemon-reload
+}
+
 setup_podman_services() {
   log_step "Servizi utente Podman"
   run systemctl --user enable --now podman.socket
   # Il linger avvia il manager utente al boot, ma nessuno riavvia i container: senza podman-restart.service quelli
   # con restart policy (always / unless-stopped) restano fermi dopo un riavvio della macchina.
   if systemctl --user cat podman-restart.service >/dev/null 2>&1; then
+    setup_podman_restart_dropin
     run systemctl --user enable podman-restart.service
   else
     log_warn "podman-restart.service non disponibile: i container non ripartiranno da soli dopo un riavvio."
@@ -945,7 +985,12 @@ summary_podman() {
   else summary_row fail "podman.socket (utente)" "$v"; fi
 
   v=$(user_unit_state podman-restart.service)
-  if [[ $v == enabled ]]; then summary_row ok "podman-restart.service" "enabled: i container ripartono al riavvio"
+  if [[ $v == enabled ]]; then
+    if [[ $(podman_restart_exec_line) == *restart-policy=unless-stopped* ]]; then
+      summary_row ok "podman-restart.service" "enabled: ripartono i container 'always' e 'unless-stopped'"
+    else
+      summary_row warn "podman-restart.service" "enabled ma solo 'always': i container compose ('unless-stopped') non ripartono"
+    fi
   elif [[ $v == assente ]]; then summary_row warn "podman-restart.service" "non disponibile: i container non ripartono da soli al riavvio"
   else summary_row fail "podman-restart.service" "$v"; fi
 
@@ -1073,6 +1118,14 @@ uninstall_podman() {
   log_step "Disinstallazione Podman (utente)"
   run_try systemctl --user disable --now podman.socket podman.service
   run_try systemctl --user disable podman-restart.service   # senza --now: lo stop fermerebbe tutti i container
+  local dropin
+  dropin=$(podman_restart_dropin_file)
+  if [[ -f $dropin ]] && grep -qF "$PODMAN_RESTART_DROPIN_MARK" "$dropin"; then
+    log_info "Rimuovo il drop-in di podman-restart.service creato dallo script."
+    run rm -f "$dropin"
+    run_try rmdir --ignore-fail-on-non-empty "$(dirname "$dropin")"
+    run_try systemctl --user daemon-reload
+  fi
   if (( PURGE )); then
     if command -v podman >/dev/null 2>&1; then
       log_info "Elimino container, immagini e volumi Podman (podman system reset)"
